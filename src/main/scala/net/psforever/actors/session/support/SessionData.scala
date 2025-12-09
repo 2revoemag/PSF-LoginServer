@@ -34,7 +34,7 @@ import net.psforever.services.ServiceManager.LookupResult
 import net.psforever.services.vehicle.{VehicleAction, VehicleServiceMessage}
 import net.psforever.services.{Service, InterstellarClusterService => ICS}
 import net.psforever.types._
-import net.psforever.util.Config
+import net.psforever.util.{Config, PacketTrailLogger, PacketTrailRingBuffer}
 
 object SessionData {
   //noinspection ScalaUnusedSymbol
@@ -93,6 +93,11 @@ class SessionData(
   private[session] var turnCounterFunc: PlanetSideGUID => Unit = SessionData.NoTurnCounterYet
   private[session] val oldRefsMap: mutable.HashMap[PlanetSideGUID, String] = new mutable.HashMap[PlanetSideGUID, String]()
   private var contextSafeEntity: PlanetSideGUID = PlanetSideGUID(0)
+
+  // Packet trail logging for crash investigation
+  private[session] val packetTrailBuffer: PacketTrailRingBuffer = PacketTrailLogger.createBuffer()
+  private[session] val sessionStartTime: Long = System.currentTimeMillis()
+  private[session] var wasGracefulDisconnect: Boolean = false
 
   val general: GeneralOperations =
     new GeneralOperations(sessionLogic=this, avatarActor, context)
@@ -555,19 +560,30 @@ class SessionData(
       accountPersistence ! AccountPersistenceService.Logout(avatar.name)
     }
     squad.cleanUpSquadCards()
+    wasGracefulDisconnect = true // Mark as graceful logout
     middlewareActor ! MiddlewareActor.Teardown()
   }
 
   def failWithError(error: String): Unit = {
     log.error(error)
+    // Dump packet trail before teardown (unexpected disconnect)
+    dumpPacketTrailOnUnexpectedDisconnect("error")
     middlewareActor ! MiddlewareActor.Teardown()
   }
 
   def sendResponse(packet: PlanetSidePacket): Unit = {
+    // Record packet for trail logging
+    PacketTrailLogger.recordPacket(packetTrailBuffer, sessionStartTime, packet)
+    // Send the packet
     middlewareActor ! MiddlewareActor.Send(packet)
   }
 
   def stop(): Unit = {
+    // Dump packet trail if this was NOT a graceful disconnect
+    if (!wasGracefulDisconnect) {
+      dumpPacketTrailOnUnexpectedDisconnect("keepalive_timeout_or_disconnect")
+    }
+
     context.stop(avatarActor)
     general.stop()
     shooting.stop()
@@ -587,6 +603,44 @@ class SessionData(
     galaxyService ! Service.Leave()
     if (avatar != null && squadService != Default.Actor) {
       squadService ! Service.Leave()
+    }
+  }
+
+  /**
+   * Dump packet trail to file for crash investigation.
+   * Called on unexpected disconnect (not graceful logout).
+   */
+  private def dumpPacketTrailOnUnexpectedDisconnect(disconnectType: String): Unit = {
+    try {
+      val sessionId = connectionState.toString // Using connectionState as session ID
+      val playerName = if (player != null) Some(player.Name) else None
+      val accountName = if (account != null) Some(account.name) else None
+      val zone = if (continent != null) Some(continent.id) else None
+      val position = if (player != null) {
+        val pos = player.Position
+        Some((pos.x, pos.y, pos.z))
+      } else None
+
+      val lastKnownState = if (player != null) {
+        if (!player.isAlive) "dead"
+        else if (player.VehicleSeated.nonEmpty) "in_vehicle"
+        else "alive"
+      } else "unknown"
+
+      PacketTrailLogger.dumpOnDisconnect(
+        buffer = packetTrailBuffer,
+        sessionStartTime = sessionStartTime,
+        sessionId = sessionId,
+        playerName = playerName,
+        accountName = accountName,
+        zone = zone,
+        position = position,
+        lastKnownState = lastKnownState,
+        disconnectType = disconnectType
+      )
+    } catch {
+      case ex: Exception =>
+        log.error(ex)("Failed to dump packet trail on disconnect")
     }
   }
 }

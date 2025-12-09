@@ -94,7 +94,8 @@ case class AppConfig(
     network: NetworkConfig,
     development: DevelopmentConfig,
     kamon: KamonConfig,
-    sentry: SentryConfig
+    sentry: SentryConfig,
+    packetTrailLogger: PacketTrailLoggerConfig = PacketTrailLoggerConfig()
 )
 
 case class LoginConfig(
@@ -332,4 +333,14 @@ case class DensityAlert(
     yellow: Int,
     orange: Int,
     red: Int
+)
+
+/**
+ * Configuration for packet trail logging (crash investigation).
+ * Records outgoing packets in a ring buffer and dumps on unexpected disconnect.
+ */
+case class PacketTrailLoggerConfig(
+    enabled: Boolean = true,
+    bufferSize: Int = 6000,
+    outputDirectory: String = "./crash_dumps"
 )
